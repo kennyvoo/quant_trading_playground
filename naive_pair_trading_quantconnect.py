@@ -20,15 +20,20 @@ class PairsTradingAlgorithm(QCAlgorithm):
     def Initialize(self):
         
         self.SetStartDate(2015,1,1)
-        self.SetEndDate(2019,1,1)
+        self.SetEndDate(2021,6,1)
         self.SetCash(100000)
         self.UniverseSettings.Resolution = Resolution.Daily
-
-        tickers = ['MMM','AXP','AMGN','AAPL', 'BA', 'CAT', 'CVX', 'CSCO', 'KO',  'GS', 'HD', 'HON', 'IBM', 'INTC', 'JNJ', 'JPM', 
-                'MCD','MRK', 'MSFT', 'NKE', 'PG', 'CRM', 'TRV', 'UNH', 'VZ', 'V',  'WMT', 'DIS']
-                    # 'DKT', 'DB', 'EVER', 'KB', 'KEY', , 'MTB', 'BMA', 'MFCB', 'MSL', 'MTU', 'MFG', 
-                    # 'PVTD', 'PB', 'PFS', 'RF', 'RY', 'RBS', 'SHG', 'STT', 'STL', 'SCNB', 'SMFG', 'STI',
-                    # 'SNV', 'TCB', 'TD', 'USB', 'UBS', 'VLY', 'WFC', 'WAL', 'WBK', 'WF', 'YDKN', 'ZBK']
+        
+        
+        # energy,technology,healthcare,finance,consumer_services,transportation
+        tickers = self.getTicket("finance")
+        
+        
+        # ['MMM','AXP','AMGN','AAPL', 'BA', 'CAT', 'CVX', 'CSCO', 'KO',  'GS', 'HD', 'HON', 'IBM', 'INTC', 'JNJ', 'JPM', 
+        #         'MCD','MRK', 'MSFT', 'NKE', 'PG', 'CRM', 'TRV', 'UNH', 'VZ', 'V',  'WMT', 'DIS']
+        
+        
+        
         
         self.AddEquity("SPY", Resolution.Daily) 
         self.threshold = 2
@@ -43,13 +48,22 @@ class PairsTradingAlgorithm(QCAlgorithm):
         self.training_period = len(temp)
 
         self.history_price = {}
+        iterated_symbol=[]
         for symbol in self.symbols:
+            iterated_symbol.append(symbol)
             hist = self.History([symbol], self.train_period_start,self.train_period_end, Resolution.Daily)
             if hist.empty or len(hist)!=self.training_period: 
+                self.Log(f'removed symbol : {symbol}')
                 self.symbols.remove(symbol)
             else:
                 df = hist.reset_index().set_index("time")
                 self.history_price.update({symbol.Value:df.to_dict()['close']})
+        to_be_deleted=set(self.symbols)-set(iterated_symbol) # removed stocks that doesnt exist in this backtesting period 
+        for symbol in to_be_deleted:
+            self.Log(f'removed symbol 2 : {symbol}')
+            self.symbols.remove(symbol)
+        
+    
         self.symbol_pairs = list(it.combinations(self.symbols, 2))  
         # Add the benchmark
         self.Log(self.history_price.keys())
@@ -57,8 +71,13 @@ class PairsTradingAlgorithm(QCAlgorithm):
         self.Schedule.On(self.DateRules.MonthStart("SPY"), self.TimeRules.AfterMarketOpen("SPY"), self.PairForming)
         self.count = 0
         self.filtered_pairs = []
+
+    def getTicket(self,sector):
+        from io import StringIO
+        temp=self.Download("https://raw.githubusercontent.com/kennyvoo/quant_trading_playground/main/top_30_cap_stock.csv")
+        df=pd.read_csv(StringIO(temp))
+        return df[sector].to_list()
         
-               
     def OnData(self, data):
         # Update the price series everyday
         for symbol in self.symbols:
@@ -69,30 +88,37 @@ class PairsTradingAlgorithm(QCAlgorithm):
         for pair in self.filtered_pairs:
             # calculate the spread of two price series
             lookback=pair.half_life
-            spread = history_price_df[pair.symbol_b][-lookback:]- pair.coef*history_price_df[pair.symbol_a][-lookback:]
-            mean = np.mean(spread)
-            std = np.std(spread)
+            pair.ts_a=history_price_df[pair.symbol_a][-lookback:]
+            pair.ts_b=history_price_df[pair.symbol_b][-lookback:]
+            pair.static_linear_reg()
+            mean = np.mean(pair.spread)
+            std = np.std(pair.spread)
             ratio = pair.coef
             
-            zScore= (spread[-1]-mean)/std
-            # long-short position is opened when pair prices have diverged by two standard deviations
-            if zScore > 2 and zScore <3:
-                if not self.Portfolio[pair.symbol_a].Invested and not self.Portfolio[pair.symbol_b].Invested:
-                    quantity = int(self.CalculateOrderQuantity(pair.symbol_a, 0.2))
-                    self.Sell(pair.symbol_a, quantity) 
-                    self.Buy(pair.symbol_b,  floor(ratio*quantity))                
+            zScore= (pair.spread[-1]-mean)/std
             
-            elif zScore <-2 and zScore>-3: 
-                quantity = int(self.CalculateOrderQuantity(pair.symbol_a, 0.2))
+            if zScore > 2 :
                 if not self.Portfolio[pair.symbol_a].Invested and not self.Portfolio[pair.symbol_b].Invested:
-                    self.Sell(pair.symbol_b, quantity) 
-                    self.Buy(pair.symbol_a, floor(ratio*quantity))  
-                    
-            # the position is closed when prices revert back
-            elif self.Portfolio[pair.symbol_a].Invested and self.Portfolio[pair.symbol_b].Invested:
+                    quantity = int(self.CalculateOrderQuantity(pair.symbol_a, 0.1))
+                    self.Buy(pair.symbol_a, quantity) 
+                    self.Sell(pair.symbol_b,  floor(ratio*quantity))                
+                if zScore >3:
                     self.Liquidate(pair.symbol_a) 
-                    self.Liquidate(pair.symbol_b)                
-                    
+                    self.Liquidate(pair.symbol_b)     
+            elif zScore <-2 : 
+                quantity = int(self.CalculateOrderQuantity(pair.symbol_a, 0.1))
+                if not self.Portfolio[pair.symbol_a].Invested and not self.Portfolio[pair.symbol_b].Invested:
+                    self.Sell(pair.symbol_a, quantity)  
+                    self.Buy(pair.symbol_b, floor(ratio*quantity)) 
+                if zScore <-3:
+                    self.Liquidate(pair.symbol_a) 
+                    self.Liquidate(pair.symbol_b)     
+            # the position is closed when prices revert back
+            elif self.Portfolio[pair.symbol_a].Invested and self.Portfolio[pair.symbol_b].Invested :
+                if zScore>=-0.5 and zScore<=0.5:
+                    self.Liquidate(pair.symbol_a) 
+                    self.Liquidate(pair.symbol_b)              
+
 
     def Rebalance(self):
         # schedule the event to fire every half year to select pairs with the smallest historical distance
@@ -113,7 +139,7 @@ class PairsTradingAlgorithm(QCAlgorithm):
             if pair.cointegration_test():
                 self.filtered_pairs.append(pair)
         self.count += 1
-        self.filtered_pairs=sorted(self.filtered_pairs, key = lambda x: x.half_life)[:4]
+        self.filtered_pairs=sorted(self.filtered_pairs, key = lambda x: x.hurst_value,reverse=True)[:10]
 
 class Pair:
     def __init__(self, symbol_a, symbol_b, ts_a, ts_b):
@@ -124,6 +150,7 @@ class Pair:
         self.coef=None
         self.spread=None # resid
         self.half_life=None
+        self.hurst_value=None
         
     def cointegration_test(self):
         if not self.CADF():
@@ -154,8 +181,8 @@ class Pair:
         tau = [np.sqrt(np.std(np.subtract(self.spread[lag:].to_list(), self.spread[:-lag].to_list()))) for lag in lags]
      
         # Use a linear fit to estimate the Hurst Exponent
-        poly = np.polyfit(np.log(lags), np.log(tau), 1)
-     
+        poly = np.polyfit(np.log(lags),np.log(tau), 1)
+        self.hurst_value=poly[0]*2.0
         # Return the Hurst exponent from the polyfit output
         return poly[0]*2.0
     
